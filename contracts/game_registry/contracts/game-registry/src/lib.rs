@@ -29,6 +29,10 @@ impl GameRegistry {
         }
         env.storage().persistent().set(&DataKey::Admin, &admin);
         env.storage().persistent().set(&DataKey::Server, &server);
+
+        // Extend TTL for Admin and Server keys to prevent expiration
+        env.storage().persistent().extend_ttl(&DataKey::Admin, 100_000, 500_000);
+        env.storage().persistent().extend_ttl(&DataKey::Server, 100_000, 500_000);
     }
 
     /// Records a game result. Only the authorized server can call this.
@@ -82,6 +86,7 @@ impl GameRegistry {
         let admin: Address = env.storage().persistent().get(&DataKey::Admin).expect("Not initialized");
         admin.require_auth();
         env.storage().persistent().set(&DataKey::Server, &new_server);
+        env.storage().persistent().extend_ttl(&DataKey::Server, 100_000, 500_000);
     }
 
     /// Updates the admin address. Only the current admin can call this.
@@ -89,6 +94,7 @@ impl GameRegistry {
         let admin: Address = env.storage().persistent().get(&DataKey::Admin).expect("Not initialized");
         admin.require_auth();
         env.storage().persistent().set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().extend_ttl(&DataKey::Admin, 100_000, 500_000);
     }
 }
 
