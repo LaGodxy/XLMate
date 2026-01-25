@@ -1,55 +1,164 @@
-name: Contract CI
+name: Contract Checks
+
 on:
   push:
-    branches:
-      - main
-    paths:
-      - "contract/**"
+    branches: [ main, develop ]
   pull_request:
-    paths:
-      - "contract/**"
+    branches: [ main ]
 
-defaults:
-  run:
-    working-directory: contract
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  check-fmt:
+  check-format:
     runs-on: ubuntu-latest
-    name: Cairo formatting
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      - uses: software-mansion/setup-scarb@v1
-        with:
-          tool-versions: contract/.tool-versions
-      - name: Check Scarb Formatting
-        run: scarb fmt --check
-  run-test:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: wasm32-unknown-unknown
+        components: rustfmt, clippy
+
+    - name: Install Soroban CLI
+      run: |
+        cargo install --locked soroban-cli
+        rustup target add wasm32-unknown-unknown
+
+    - name: Check formatting
+      run: |
+        cd contracts
+        cargo fmt --check
+
+  lint:
     runs-on: ubuntu-latest
-    name: Cairo test
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      - uses: software-mansion/setup-scarb@v1
-        with:
-          tool-versions: contract/.tool-versions
-      - name: Install universal sierra compiler
-        shell: bash
-        run: |
-          curl -L https://raw.githubusercontent.com/software-mansion/universal-sierra-compiler/master/scripts/install.sh | sh
-          echo "/root/.local/bin" >> ${GITHUB_PATH}
-      - name: Check universal sierra compiler version
-        shell: bash
-        run: universal-sierra-compiler --version
-      # Rust is required by Starknet Foundry
-      - name: Set Up Stable Rust Toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-      - uses: foundry-rs/setup-snfoundry@v3
-        with:
-          tool-versions: contract/.tool-versions
-      - name: Run scarb test
-        run: scarb test
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: wasm32-unknown-unknown
+        components: rustfmt, clippy
+
+    - name: Install Soroban CLI
+      run: |
+        cargo install --locked soroban-cli
+        rustup target add wasm32-unknown-unknown
+
+    - name: Run clippy
+      run: |
+        cd contracts
+        cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: wasm32-unknown-unknown
+
+    - name: Install Soroban CLI
+      run: |
+        cargo install --locked soroban-cli
+        rustup target add wasm32-unknown-unknown
+
+    - name: Run tests
+      run: |
+        cd contracts
+        cargo test --workspace
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: wasm32-unknown-unknown
+
+    - name: Install Soroban CLI
+      run: |
+        cargo install --locked soroban-cli
+        rustup target add wasm32-unknown-unknown
+
+    - name: Build contracts
+      run: |
+        cd contracts
+        cargo build --target wasm32-unknown-unknown --release
+        # Verify WASM files were created
+        find . -name "*.wasm" -type f
+
+  contract-verification:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: wasm32-unknown-unknown
+
+    - name: Install Soroban CLI
+      run: |
+        cargo install --locked soroban-cli
+        rustup target add wasm32-unknown-unknown
+
+    - name: Verify contract structure
+      run: |
+        cd contracts
+        # Check that each contract has required files
+        for contract_dir in */; do
+          if [ -d "$contract_dir" ]; then
+            contract_name=$(basename "$contract_dir")
+            echo "Checking contract: $contract_name"
+            
+            # Verify Cargo.toml exists
+            if [ ! -f "$contract_dir/Cargo.toml" ]; then
+              echo "Error: $contract_dir/Cargo.toml not found"
+              exit 1
+            fi
+            
+            # Verify src/lib.rs exists
+            if [ ! -f "$contract_dir/src/lib.rs" ]; then
+              echo "Error: $contract_dir/src/lib.rs not found"
+              exit 1
+            fi
+            
+            echo "✓ Contract $contract_name structure verified"
+          fi
+        done
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: wasm32-unknown-unknown
+
+    - name: Install Soroban CLI
+      run: |
+        cargo install --locked soroban-cli
+        rustup target add wasm32-unknown-unknown
+
+    - name: Install cargo-audit
+      run: cargo install cargo-audit
+
+    - name: Audit dependencies
+      run: |
+        cd contracts
+        cargo audit
