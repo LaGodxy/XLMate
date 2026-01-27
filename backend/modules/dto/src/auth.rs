@@ -34,11 +34,17 @@ pub struct AuthResponse {
     #[schema(example = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")]
     pub access_token: String,
 
+    #[schema(example = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")]
+    pub refresh_token: String,
+
     #[schema(example = "Bearer")]
     pub token_type: String,
 
     #[schema(example = 3600)]
     pub expires_in: usize,
+
+    #[schema(example = 604800)]
+    pub refresh_token_expires_in: usize,
 
     #[schema(example = "1")]
     pub user_id: i32,
@@ -87,6 +93,27 @@ pub struct TokenResponse {
     
     #[schema(example = 3600)]
     pub expires_in: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RefreshResponse {
+    #[schema(example = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")]
+    pub access_token: String,
+    
+    #[schema(example = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")]
+    pub refresh_token: String,
+    
+    #[schema(example = "Bearer")]
+    pub token_type: String,
+    
+    #[schema(example = 3600)]
+    pub expires_in: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct LogoutResponse {
+    #[schema(example = "Logged out successfully")]
+    pub message: String,
 }
 
 pub type LoginResponse = AuthResponse;

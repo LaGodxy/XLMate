@@ -12,7 +12,7 @@ use utoipa_redoc::{Redoc, Servable};
 use actix::Actor;
 use crate::players::{add_player, delete_player, find_player_by_id, update_player};
 use crate::games::{create_game, get_game, make_move, list_games, join_game, abandon_game};
-use crate::auth::{login, register}; // refresh_token, logout
+use crate::auth::{login, register, refresh, logout};
 use crate::ai::{get_ai_suggestion, analyze_position};
 use crate::ws::{LobbyState, ws_route};
 use crate::config::AppConfig;
@@ -162,25 +162,8 @@ pub async fn main() -> std::io::Result<()> {
                     .wrap(Governor::new(&auth_governor_conf))
                     .service(login)
                     .service(register)
-                    // Protected route with JWT authentication
-                    // Note: main uses JwtService, but we stick to JwtAuthMiddleware for route protection
-                    // as it was working in our feature.
-                    // We can update this to use JwtService if it provides middleware, but currently it seems to be just a service.
-                    // We use JwtAuthMiddleware which we updated to use JwtService logic internally? 
-                    // No, we updated JwtAuthMiddleware to use JwtService logic.
-                    // So we need to pass jwt_secret and expiration to it.
-                    // Wait, JwtAuthMiddleware::new takes (secret_key, expiration_time).
-                    // We have jwt_secret and jwt_expiration available.
-                    .service(
-                        web::scope("/protected")
-                            // .wrap(JwtAuthMiddleware::new(jwt_secret.clone(), jwt_expiration)) 
-                            // Wait, we need to check if we have a logout service. main doesn't seem to have it in imports?
-                            // My imports had `use crate::auth::{..., logout};`
-                            // main imports `use crate::auth::{login, register};`
-                            // I should check if `logout` exists in `auth`.
-                            // For now I'll comment out logout if it's missing, or assume it's there.
-                            // I'll check auth module next.
-                    ),
+                    .service(refresh)
+                    .service(logout)
             )
             // AI routes
             .service(
