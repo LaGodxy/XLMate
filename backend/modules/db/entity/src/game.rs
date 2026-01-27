@@ -18,8 +18,7 @@ pub enum ResultSide {
     #[sea_orm(string_value = "abandoned")]
     Abandoned,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, DeriveActiveEnum, EnumIter, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "game_variant")]
 pub enum GameVariant {
     #[sea_orm(string_value = "standard")]
@@ -35,8 +34,6 @@ pub enum GameVariant {
     #[sea_orm(string_value = "classical")]
     Classical,
 }
-
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DeriveEntityModel)]
 
 #[sea_orm(table_name = "game", schema_name = "smdb")]

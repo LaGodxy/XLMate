@@ -13,6 +13,11 @@ members = [
     "challenge",
     "tournament",
     "matchmaking",
+    "engine"
 ]
+
+[workspace.dependencies]
+regex = "1.10.2"
+utoipa = "4.2.0"
 
 

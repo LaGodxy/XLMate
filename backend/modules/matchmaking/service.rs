@@ -2,6 +2,7 @@ use actix_web::web;
 use chrono::Utc;
 use deadpool_redis::Pool;
 use redis::AsyncCommands;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -428,12 +429,12 @@ impl MatchmakingService {
         let key = "matchmaking:queue:casual";
 
         // Pop the oldest player from queue (FIFO)
-        let result: Option<(String, f64)> = conn
+        let result: Vec<(String, f64)> = conn
             .zpopmin(key, 1)
             .await
-            .map_err(|e| format!("Redis ZPOPMIN failed: {}", e))?
-            .into_iter()
-            .next();
+            .map_err(|e| format!("Redis ZPOPMIN failed: {}", e))?;
+        
+        let result = result.into_iter().next();
 
         if let Some((member, _score)) = result {
             if let Ok(opponent_request) = MatchRequest::from_redis_value(&member) {
