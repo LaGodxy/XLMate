@@ -1,6 +1,6 @@
 // import { Button } from "@/components/ui/button";
 // import { useAppContext } from "@/context/walletContext";
-// import { useConnect } from "@starknet-react/core";
+// Wallet connection modal - implementation pending
 // import { useState } from "react";
 
 // interface WalletConnectModalProps {
@@ -44,7 +44,7 @@
 //           <div className="text-center">
 //             <h2 className="text-xl font-bold text-white">Connect Wallet</h2>
 //             <p className="text-gray-400 mt-2">
-//               Choose your preferred wallet to connect to StarkMate
+//               Choose your preferred wallet to connect to XLMate
 //             </p>
 //           </div>
 //           <div className="space-y-3">
@@ -98,3 +98,23 @@
 //     </div>
 //   );
 // }
+
+// Placeholder export while WalletConnectModal is being implemented
+export function WalletConnectModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="relative bg-gray-900 rounded-lg border border-gray-800 p-6 w-full max-w-md mx-4">
+        <button
+          onClick={onClose}
+          className="absolute top-4 right-4 text-gray-400 hover:text-white"
+          aria-label="Close modal"
+        >
+          ✕
+        </button>
+        <h2 className="text-xl font-semibold text-white mb-4">Connect Wallet</h2>
+        <p className="text-gray-400 mb-6">Wallet connection coming soon</p>
+      </div>
+    </div>
+  );
+}
