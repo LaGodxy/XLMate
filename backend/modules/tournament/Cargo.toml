@@ -3,15 +3,9 @@ name = "tournament"
 version = "0.1.0"
 edition = "2021"
 
-[workspace]
-
 [lib]
 name = "tournament"
 path = "src/lib.rs"
-
-[[bin]]
-name = "tournament"
-path = "src/main.rs"
 
 [dependencies]
 uuid = { version = "1.8.0", features = ["serde", "v4"] }
