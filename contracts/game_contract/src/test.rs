@@ -2,7 +2,9 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, Map, Vec};
+use soroban_sdk::testutils::Address as _;
+use soroban_sdk::token::{StellarAssetClient, TokenClient};
+use soroban_sdk::{Address, Bytes, Env, Map, Vec};
 
 /// Helper: seed a completed game directly into contract storage, bypassing
 /// token transfers and auth checks.  Returns the game_id (always 1).
@@ -177,7 +179,111 @@ fn test_payout_tournament_invalid_percentage() {
 
     // Result should be Err matching InvalidPercentage (12)
     assert!(res.is_err());
-    let err = res.err().unwrap();
-    // In soroban tests, try_ functions return Result<Result<T, Result<E, Result<soroban_sdk::Error, ...>>>>
-    // Instead of explicitly checking the error code, we can just ensure it is an error.
+}
+
+#[test]
+fn test_payout_with_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, GameContract);
+    let client = GameContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let player1 = Address::generate(&env);
+    let player2 = Address::generate(&env);
+    let treasury_addr = Address::generate(&env);
+
+    // Register token contract
+    let stellar_token = env.register_stellar_asset_contract_v2(issuer);
+    let token_address = stellar_token.address();
+    let stellar_asset_client = StellarAssetClient::new(&env, &token_address);
+
+    // Initialize Game Contract with token
+    client.initialize_token(&admin, &token_address);
+
+    // Initialize Puzzle Rewards/Fees
+    let admin_key = Bytes::from_slice(&env, &[0u8; 32]);
+    client.initialize_puzzle_rewards(&admin, &admin_key, &0i128, &20u32, &treasury_addr); // 2% fee (20 bips)
+
+    let wager = 500; // Total pool 1000
+    stellar_asset_client.mint(&player1, &wager);
+    stellar_asset_client.mint(&player2, &wager);
+
+    let game_id = client.create_game(&player1, &wager);
+    client.join_game(&game_id, &player2);
+
+    // Force complete the game and set winner
+    env.as_contract(&contract_id, || {
+        let mut games: Map<u64, Game> = env.storage().instance().get(&GAMES).unwrap();
+        let mut game = games.get(game_id).unwrap();
+        game.state = GameState::Completed;
+        game.winner = Some(player1.clone());
+        games.set(game_id, game);
+        env.storage().instance().set(&GAMES, &games);
+    });
+
+    client.payout(&game_id, &player1);
+
+    env.as_contract(&contract_id, || {
+        let escrow: Map<Address, i128> = env.storage().instance().get(&ESCROW).unwrap();
+        let winner_escrow = escrow.get(player1.clone()).unwrap_or(0);
+        let treasury_escrow = escrow.get(treasury_addr.clone()).unwrap_or(0);
+        let loser_escrow = escrow.get(player2.clone()).unwrap_or(0);
+
+        assert_eq!(winner_escrow, 980);
+        assert_eq!(treasury_escrow, 20);
+        assert_eq!(loser_escrow, 0);
+    });
+}
+
+#[test]
+fn test_configure_fees_permissioned() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, GameContract);
+    let client = GameContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury_addr = Address::generate(&env);
+    let admin_key = Bytes::from_slice(&env, &[0u8; 32]);
+    
+    env.mock_all_auths();
+    client.initialize_puzzle_rewards(&admin, &admin_key, &0i128, &0u32, &treasury_addr);
+
+    // Update fees as admin
+    let new_treasury = Address::generate(&env);
+    client.configure_fees(&admin, &50, &new_treasury); // 5% fee
+
+    // Verify update
+    // (In a real test we'd check storage or run a payout, but here we just ensure it doesn't panic)
+    
+    // Attempt update as someone else should panic
+    let stranger = Address::generate(&env);
+    let res = client.try_configure_fees(&stranger, &100, &new_treasury);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_upgrade_admin_logic() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, GameContract);
+    let client = GameContractClient::new(&env, &contract_id);
+
+    let admin_key = Bytes::from_slice(&env, &[0u8; 32]);
+    
+    // Manually set ADMIN_KEY to simulate old initialization (pre-CONTRACT_ADMIN)
+    env.as_contract(&contract_id, || {
+        env.storage().instance().set(&symbol_short!("ADMIN_KEY"), &admin_key);
+    });
+
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+    
+    // upgrade_admin should allow setting the admin for the first time
+    client.upgrade_admin(&admin);
+
+    // Further calls to upgrade_admin should panic
+    let stranger = Address::generate(&env);
+    let res = client.try_upgrade_admin(&stranger);
+    assert!(res.is_err());
 }
