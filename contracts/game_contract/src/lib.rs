@@ -1,8 +1,8 @@
 #![no_std]
 use soroban_sdk::token::TokenClient;
 use soroban_sdk::{
-    Address, Bytes, BytesN, Env, Map, Symbol, Vec, contract, contracterror, contractimpl,
-    contracttype, symbol_short,
+    contract, contracterror, contractimpl, contract, contracttype, symbol_short, Address, Bytes, BytesN, Env,
+    Map, Symbol, Vec,
 };
 
 // Game states
@@ -53,6 +53,11 @@ const BALANCES: Symbol = symbol_short!("BALANCES"); // Map<Address, i128> user b
 const USED_NONCE: Symbol = symbol_short!("NONCES"); // Map<u64, bool> replay protection
 const MAX_STAKE: Symbol = symbol_short!("MAXSTAKE");
 
+// Fee storage keys
+const FEE_BIPS: Symbol = symbol_short!("FEE_BIPS");
+const TREASURY_ADDR: Symbol = symbol_short!("TR_ADDR");
+const CONTRACT_ADMIN: Symbol = symbol_short!("CT_ADMIN");
+
 // Contract errors
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -80,6 +85,11 @@ pub struct GameContract;
 
 #[contractimpl]
 impl GameContract {
+    pub fn initialize(env: Env, token_contract: Address) {
+        if env.storage().instance().has(&TOKEN_CONTRACT) {
+            panic!("Contract already initialized");
+        }
+        token_contract.require_auth();
     pub fn initialize_token(env: Env, admin: Address, token_contract: Address) {
         if env.storage().instance().has(&TOKEN_CONTRACT) {
             panic!("Contract already initialized");
@@ -101,6 +111,8 @@ impl GameContract {
         TokenClient::new(env, &Self::token_contract_address(env))
     }
 
+    // Create a new game with token-based escrow
+    pub fn create_game(env: Env, player1: Address, wager_amount: i128) -> u64 {
     // FIX 3: Changed `panic!("Insufficient funds")` to return
     // `Err(ContractError::InsufficientFunds)` for consistent API behavior
     // with `join_game` which already uses the Result-based error pattern.
@@ -121,6 +133,7 @@ impl GameContract {
         let contract_address = env.current_contract_address();
         let player_balance = token_client.balance(&player1);
         if player_balance < wager_amount {
+            panic!("Insufficient funds");
             return Err(ContractError::InsufficientFunds);
         }
 
@@ -558,21 +571,52 @@ impl GameContract {
         let winner_escrow = escrow.get(winner.clone()).unwrap_or(0);
         escrow.set(winner.clone(), winner_escrow + (game.wager_amount * 2));
 
-        // Transfer both wagers to winner
-        let winner_escrow = escrow.get(winner.clone()).unwrap_or(0);
-        escrow.set(winner.clone(), winner_escrow + (game.wager_amount * 2));
 
-        // Remove from loser's escrow
-        let loser = if winner == &game.player1 {
-            game.player2.as_ref().ok_or(ContractError::GameFull)?
+        let fee_bips: u32 = env.storage().instance().get(&FEE_BIPS).unwrap_or(0);
+        let treasury_addr_opt: Option<Address> = env.storage().instance().get(&TREASURY_ADDR);
+
+        let total_pool = game.wager_amount * 2;
+
+        let (payout, fee) = if treasury_addr_opt.is_some() {
+            let fee = (total_pool * fee_bips as i128) / 1000;
+            (total_pool - fee, fee)
         } else {
-            &game.player1
+            (total_pool, 0)
         };
 
-        let loser_escrow = escrow.get(loser.clone()).unwrap_or(0);
-        escrow.set(loser.clone(), loser_escrow - game.wager_amount);
+        // Subtract wagers from both players first (clean state)
+        let player1_escrow = escrow.get(game.player1.clone()).unwrap_or(0);
+        escrow.set(game.player1.clone(), player1_escrow - game.wager_amount);
+
+        let player2 = game.player2.as_ref().ok_or(ContractError::GameFull)?;
+        let player2_escrow = escrow.get(player2.clone()).unwrap_or(0);
+        escrow.set(player2.clone(), player2_escrow - game.wager_amount);
+
+        // Add payout to winner
+        let winner_escrow = escrow.get(winner.clone()).unwrap_or(0);
+        escrow.set(winner.clone(), winner_escrow + payout);
+
+        // Add fee to treasury if it exists
+        if fee > 0 {
+            if let Some(ref treasury_addr) = treasury_addr_opt {
+                let treasury_escrow = escrow.get(treasury_addr.clone()).unwrap_or(0);
+                escrow.set(treasury_addr.clone(), treasury_escrow + fee);
+            }
+        }
 
         env.storage().instance().set(&ESCROW, &escrow);
+
+        // Perform physical token transfers
+        let token_client = Self::token_client(env);
+        let contract_address = env.current_contract_address();
+        
+        token_client.transfer(&contract_address, winner, &payout);
+        if fee > 0 {
+            if let Some(ref treasury_addr) = treasury_addr_opt {
+                token_client.transfer(&contract_address, treasury_addr, &fee);
+            }
+        }
+
         Ok(())
     }
 
@@ -590,21 +634,52 @@ impl GameContract {
         let winner_escrow = escrow.get(winner.clone()).unwrap_or(0);
         escrow.set(winner.clone(), winner_escrow + (game.wager_amount * 2));
 
-        // Transfer both wagers to winner
-        let winner_escrow = escrow.get(winner.clone()).unwrap_or(0);
-        escrow.set(winner.clone(), winner_escrow + (game.wager_amount * 2));
 
-        // Remove from loser's escrow
-        let loser = if winner == &game.player1 {
-            game.player2.as_ref().ok_or(ContractError::GameFull)?
+        let fee_bips: u32 = env.storage().instance().get(&FEE_BIPS).unwrap_or(0);
+        let treasury_addr_opt: Option<Address> = env.storage().instance().get(&TREASURY_ADDR);
+
+        let total_pool = game.wager_amount * 2;
+
+        let (payout, fee) = if treasury_addr_opt.is_some() {
+            let fee = (total_pool * fee_bips as i128) / 1000;
+            (total_pool - fee, fee)
         } else {
-            &game.player1
+            (total_pool, 0)
         };
 
-        let loser_escrow = escrow.get(loser.clone()).unwrap_or(0);
-        escrow.set(loser.clone(), loser_escrow - game.wager_amount);
+        // Subtract wagers from both players first (clean state)
+        let player1_escrow = escrow.get(game.player1.clone()).unwrap_or(0);
+        escrow.set(game.player1.clone(), player1_escrow - game.wager_amount);
+
+        let player2 = game.player2.as_ref().ok_or(ContractError::GameFull)?;
+        let player2_escrow = escrow.get(player2.clone()).unwrap_or(0);
+        escrow.set(player2.clone(), player2_escrow - game.wager_amount);
+
+        // Add payout to winner
+        let winner_escrow = escrow.get(winner.clone()).unwrap_or(0);
+        escrow.set(winner.clone(), winner_escrow + payout);
+
+        // Add fee to treasury if it exists
+        if fee > 0 {
+            if let Some(ref treasury_addr) = treasury_addr_opt {
+                let treasury_escrow = escrow.get(treasury_addr.clone()).unwrap_or(0);
+                escrow.set(treasury_addr.clone(), treasury_escrow + fee);
+            }
+        }
 
         env.storage().instance().set(&ESCROW, &escrow);
+
+        // Perform physical token transfers
+        let token_client = Self::token_client(env);
+        let contract_address = env.current_contract_address();
+        
+        token_client.transfer(&contract_address, winner, &payout);
+        if fee > 0 {
+            if let Some(ref treasury_addr) = treasury_addr_opt {
+                token_client.transfer(&contract_address, treasury_addr, &fee);
+            }
+        }
+
         Ok(())
     }
 
@@ -620,11 +695,20 @@ impl GameContract {
     /// * `treasury_amount`  - Tokens pre-funded into the treasury for puzzle payouts
     // FIX 1 (continued): Renamed from `initialize` to `initialize_puzzle_rewards`
     // to resolve the duplicate function name compilation error.
-    pub fn initialize_puzzle_rewards(env: Env, admin_public_key: Bytes, treasury_amount: i128) {
+    pub fn initialize_puzzle_rewards(
+        env: Env,
+        admin: Address,
+        admin_public_key: Bytes,
+        treasury_amount: i128,
+        fee_bips: u32,
+        treasury_address: Address,
+    ) {
         // Prevent re-initialization
-        if env.storage().instance().has(&ADMIN_KEY) {
+        if env.storage().instance().has(&CONTRACT_ADMIN) {
             panic!("Already initialized");
         }
+
+        admin.require_auth();
 
         if admin_public_key.len() != 32 {
             panic!("Admin public key must be 32 bytes");
@@ -634,6 +718,11 @@ impl GameContract {
             panic!("Treasury amount must be non-negative");
         }
 
+        if fee_bips > 1000 {
+            panic!("Fee bips must be between 0 and 1000");
+        }
+
+        env.storage().instance().set(&CONTRACT_ADMIN, &admin);
         env.storage().instance().set(&ADMIN_KEY, &admin_public_key);
         env.storage().instance().set(&TREASURY, &treasury_amount);
         env.storage().instance().set(&MAX_STAKE, &1000i128); // Default 1000 XLM
@@ -648,6 +737,44 @@ impl GameContract {
         // In a real scenario, you'd check auth against the admin key.
         // For now, we'll just allow it to be set (or add a simple auth check if requested).
         env.storage().instance().set(&MAX_STAKE, &new_limit);
+        env.storage().instance().set(&FEE_BIPS, &fee_bips);
+        env.storage().instance().set(&TREASURY_ADDR, &treasury_address);
+    }
+
+    /// Update fee configuration. Only callable by the contract admin.
+    pub fn configure_fees(env: Env, admin: Address, fee_bips: u32, treasury_address: Address) {
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&CONTRACT_ADMIN)
+            .expect("Not initialized");
+        current_admin.require_auth();
+
+        if admin != current_admin {
+            panic!("Unauthorized admin address");
+        }
+
+        if fee_bips > 1000 {
+            panic!("Fee bips must be between 0 and 1000");
+        }
+
+        env.storage().instance().set(&FEE_BIPS, &fee_bips);
+        env.storage().instance().set(&TREASURY_ADDR, &treasury_address);
+    }
+
+    /// Support legacy deployments by allowing the first admin to be set if missing.
+    pub fn upgrade_admin(env: Env, admin: Address) {
+        if env.storage().instance().has(&CONTRACT_ADMIN) {
+            panic!("Admin already set");
+        }
+
+        // For upgrade safety, we can only do this if it was previously initialized but without an admin
+        if !env.storage().instance().has(&ADMIN_KEY) {
+            panic!("Contract must be initialized first");
+        }
+
+        admin.require_auth();
+        env.storage().instance().set(&CONTRACT_ADMIN, &admin);
     }
 
     /// Claim a puzzle reward by presenting a backend-signed proof of completion.
@@ -772,6 +899,52 @@ impl GameContract {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::token::{StellarAssetClient, TokenClient};
+    use soroban_sdk::{Address, Env};
+
+    #[test]
+    fn test_usdc_staking_workflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let issuer = Address::generate(&env);
+        let player1 = Address::generate(&env);
+        let player2 = Address::generate(&env);
+
+        let stellar_token = env.register_stellar_asset_contract_v2(issuer.clone());
+        let token_address = stellar_token.address();
+        let token_client = TokenClient::new(&env, &token_address);
+        let stellar_asset_client = StellarAssetClient::new(&env, &token_address);
+
+        // Mint both player balances
+        let fund_amount: i128 = 1_000;
+        stellar_asset_client.mint(&player1, &fund_amount);
+        stellar_asset_client.mint(&player2, &fund_amount);
+
+        // Deploy game contract and initialize with token contract
+        let contract_id = env.register_contract(None, GameContract);
+        let client = GameContractClient::new(&env, &contract_id);
+        client.initialize(&token_address);
+
+        // Player 1 creates game with USDC staking
+        let initial_wager: i128 = 100;
+        let game_id = client.create_game(&player1, &initial_wager);
+
+        // Player 2 joins game
+        client.join_game(&game_id, &player2);
+
+        // Player 1 forfeits, winner is player 2; contract should pay out 200
+        client.forfeit(&game_id, &player1);
+
+        let final_player2_balance = token_client.balance(&player2);
+        assert_eq!(final_player2_balance, 1_100);
+    }
+}
+    use soroban_sdk::{
+        testutils::Address as _,
+        Bytes, BytesN, Env,
+    };
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
     use soroban_sdk::testutils::Address as _;
@@ -856,15 +1029,23 @@ mod tests {
     // Helper: register + initialize the contract with a generated admin key.
     // Returns (client, signing_key).
     // ────────────────────────────────────────────────────────────────────────
-    fn setup(env: &Env, treasury_amount: i128) -> (GameContractClient, SigningKey) {
+    fn setup(env: &Env, treasury_amount: i128) -> (GameContractClient<'_>, SigningKey) {
         let contract_id = env.register_contract(None, GameContract);
         let client = GameContractClient::new(env, &contract_id);
 
+        let admin = Address::generate(env);
         let signing_key = SigningKey::generate(&mut OsRng);
         let verifying_key_bytes: [u8; 32] = signing_key.verifying_key().to_bytes();
         let admin_key = Bytes::from_slice(env, &verifying_key_bytes);
+        let treasury_addr = Address::generate(env);
 
-        client.initialize_puzzle_rewards(&admin_key, &treasury_amount);
+        client.initialize_puzzle_rewards(
+            &admin,
+            &admin_key,
+            &treasury_amount,
+            &0u32,
+            &treasury_addr,
+        );
         (client, signing_key)
     }
 
