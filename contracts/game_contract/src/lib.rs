@@ -63,6 +63,10 @@ const FEE_BIPS: Symbol = symbol_short!("FEE_BIPS"); // u32  (0–1000, i.e. 0–
 const TREASURY_ADDR: Symbol = symbol_short!("TR_ADDR"); // Address
 const CONTRACT_ADMIN: Symbol = symbol_short!("CT_ADMIN"); // Address
 
+// Emergency refund system
+const REFUND_DEADLINE: Symbol = symbol_short!("R_DEAD"); // u64 - ledger sequences before refund available
+const REFUNDS: Symbol = symbol_short!("REFUNDS"); // Map<u64, bool> - track refunded games
+
 // ────────────────────────────────────────────────────────────────────────────
 // Errors
 // ────────────────────────────────────────────────────────────────────────────
@@ -86,6 +90,12 @@ pub enum ContractError {
     /// Invalid or already-used backend signature  (#199)
     Unauthorized = 14,
     StakeLimitExceeded = 15,
+    /// Refund deadline not reached
+    RefundDeadlineNotReached = 16,
+    /// Game already refunded
+    AlreadyRefunded = 17,
+    /// Refund not allowed for this game state
+    RefundNotAllowed = 18,
 }
 
 #[contract]
@@ -748,6 +758,183 @@ impl GameContract {
     pub fn treasury_balance(env: Env) -> i128 {
         env.storage().instance().get(&TREASURY).unwrap_or(0)
     }
+
+    // ── Emergency Refund System ────────────────────────────────────────────
+
+    /// Configure emergency refund system
+    /// * `admin` - Contract admin
+    /// * `deadline` - Number of ledger sequences after game creation before refunds are allowed
+    pub fn configure_refund_system(env: Env, admin: Address, deadline: u64) {
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&CONTRACT_ADMIN)
+            .expect("Not initialized");
+        current_admin.require_auth();
+
+        if admin != current_admin {
+            panic!("Unauthorized admin address");
+        }
+        if deadline == 0 {
+            panic!("Refund deadline must be greater than 0");
+        }
+
+        env.storage().instance().set(&REFUND_DEADLINE, &deadline);
+    }
+
+    /// Request emergency refund for a game
+    /// Conditions:
+    /// 1. Game must be in Created state (never joined) OR InProgress with no moves
+    /// 2. Refund deadline must have passed
+    /// 3. Game must not have been refunded already
+    /// 
+    /// Both players receive their wagers back
+    pub fn emergency_refund(env: Env, game_id: u64, requester: Address) -> Result<(), ContractError> {
+        requester.require_auth();
+
+        let mut games: Map<u64, Game> = env
+            .storage()
+            .instance()
+            .get(&GAMES)
+            .ok_or(ContractError::GameNotFound)?;
+
+        let mut game = games.get(game_id).ok_or(ContractError::GameNotFound)?;
+
+        // Check if already refunded
+        let mut refunds: Map<u64, bool> = env
+            .storage()
+            .instance()
+            .get(&REFUNDS)
+            .unwrap_or(Map::new(&env));
+
+        if refunds.get(game_id).unwrap_or(false) {
+            return Err(ContractError::AlreadyRefunded);
+        }
+
+        // Game must be in Created or InProgress state
+        if game.state != GameState::Created && game.state != GameState::InProgress {
+            return Err(ContractError::RefundNotAllowed);
+        }
+
+        // If InProgress, must have no moves
+        if game.state == GameState::InProgress && game.moves.len() > 0 {
+            return Err(ContractError::RefundNotAllowed);
+        }
+
+        // Check refund deadline
+        let refund_deadline: u64 = env
+            .storage()
+            .instance()
+            .get(&REFUND_DEADLINE)
+            .ok_or(ContractError::RefundDeadlineNotReached)?;
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let elapsed = current_ledger - game.created_at;
+
+        if elapsed < refund_deadline {
+            return Err(ContractError::RefundDeadlineNotReached);
+        }
+
+        // Requester must be a player
+        if requester != game.player1 && Some(requester.clone()) != game.player2 {
+            return Err(ContractError::NotPlayer);
+        }
+
+        // Process refund
+        let token_client = Self::token_client(&env);
+        let contract_address = env.current_contract_address();
+
+        // Refund player1
+        token_client.transfer(&contract_address, &game.player1, &game.wager_amount);
+
+        // Refund player2 if exists
+        if let Some(ref player2) = game.player2 {
+            token_client.transfer(&contract_address, player2, &game.wager_amount);
+        }
+
+        // Update escrow
+        let mut escrow: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&ESCROW)
+            .unwrap_or(Map::new(&env));
+
+        let player1_escrow = escrow.get(game.player1.clone()).unwrap_or(0);
+        escrow.set(game.player1.clone(), player1_escrow - game.wager_amount);
+
+        if let Some(ref player2) = game.player2 {
+            let player2_escrow = escrow.get(player2.clone()).unwrap_or(0);
+            escrow.set(player2.clone(), player2_escrow - game.wager_amount);
+        }
+
+        env.storage().instance().set(&ESCROW, &escrow);
+
+        // Mark game as refunded
+        game.state = GameState::Drawn; // Use Drawn state to indicate refund
+        let wager_amount = game.wager_amount;
+        games.set(game_id, game);
+        env.storage().instance().set(&GAMES, &games);
+
+        // Track refund
+        refunds.set(game_id, true);
+        env.storage().instance().set(&REFUNDS, &refunds);
+
+        // Emit refund event
+        env.events().publish(
+            (symbol_short!("refund"), game_id),
+            (requester, wager_amount),
+        );
+
+        Ok(())
+    }
+
+    /// Check if a game is eligible for emergency refund
+    pub fn is_refundable(env: Env, game_id: u64) -> Result<bool, ContractError> {
+        let games: Map<u64, Game> = env
+            .storage()
+            .instance()
+            .get(&GAMES)
+            .ok_or(ContractError::GameNotFound)?;
+
+        let game = games.get(game_id).ok_or(ContractError::GameNotFound)?;
+
+        // Check if already refunded
+        let refunds: Map<u64, bool> = env
+            .storage()
+            .instance()
+            .get(&REFUNDS)
+            .unwrap_or(Map::new(&env));
+
+        if refunds.get(game_id).unwrap_or(false) {
+            return Ok(false);
+        }
+
+        // Game must be in Created or InProgress state
+        if game.state != GameState::Created && game.state != GameState::InProgress {
+            return Ok(false);
+        }
+
+        // If InProgress, must have no moves
+        if game.state == GameState::InProgress && game.moves.len() > 0 {
+            return Ok(false);
+        }
+
+        // Check refund deadline
+        let refund_deadline: u64 = match env.storage().instance().get(&REFUND_DEADLINE) {
+            Some(deadline) => deadline,
+            None => return Ok(false),
+        };
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let elapsed = current_ledger - game.created_at;
+
+        Ok(elapsed >= refund_deadline)
+    }
+
+    /// Get refund deadline configuration
+    pub fn get_refund_deadline(env: Env) -> Option<u64> {
+        env.storage().instance().get(&REFUND_DEADLINE)
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -760,6 +947,7 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
     use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::Ledger as _;
     use soroban_sdk::token::{StellarAssetClient, TokenClient};
     use soroban_sdk::{Address, Bytes, BytesN, Env};
 
@@ -1018,5 +1206,166 @@ mod tests {
         let sig2 = sign_payload(&env, &signing_key, &recipient, reward_amount, nonce);
         let result = client.try_claim_puzzle_reward(&recipient, &reward_amount, &nonce, &sig2);
         assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+    }
+
+    // ── Emergency Refund System Tests ──────────────────────────────────────
+
+    #[test]
+    fn test_emergency_refund_created_game() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let issuer = Address::generate(&env);
+        let stellar_token = env.register_stellar_asset_contract_v2(issuer.clone());
+        let token_address = stellar_token.address();
+        let token_client = TokenClient::new(&env, &token_address);
+        let stellar_asset_client = StellarAssetClient::new(&env, &token_address);
+
+        let admin = Address::generate(&env);
+        let player1 = Address::generate(&env);
+        let treasury_addr = Address::generate(&env);
+
+        stellar_asset_client.mint(&player1, &1_000i128);
+
+        let contract_id = env.register_contract(None, GameContract);
+        let client = GameContractClient::new(&env, &contract_id);
+
+        client.initialize_token(&admin, &token_address);
+        client.initialize_puzzle_rewards(&admin, &Bytes::from_slice(&env, &[0u8; 32]), &0i128, &0u32, &treasury_addr);
+        client.configure_refund_system(&admin, &100u64);
+        client.set_max_stake(&1_000i128);
+
+        let wager: i128 = 100;
+        let game_id = client.create_game(&player1, &wager);
+
+        // Advance ledger past refund deadline
+        env.ledger().set_sequence_number(101);
+
+        // Request refund
+        client.emergency_refund(&game_id, &player1);
+
+        // Verify player1 got refund
+        assert_eq!(token_client.balance(&player1), 1_000); // Got full refund
+
+        // Verify game is marked as refunded
+        let refundable = client.is_refundable(&game_id);
+        assert!(!refundable);
+    }
+
+    #[test]
+    fn test_emergency_refund_deadline_not_reached() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let issuer = Address::generate(&env);
+        let stellar_token = env.register_stellar_asset_contract_v2(issuer.clone());
+        let token_address = stellar_token.address();
+        let stellar_asset_client = StellarAssetClient::new(&env, &token_address);
+
+        let admin = Address::generate(&env);
+        let player1 = Address::generate(&env);
+        let treasury_addr = Address::generate(&env);
+
+        stellar_asset_client.mint(&player1, &1_000i128);
+
+        let contract_id = env.register_contract(None, GameContract);
+        let client = GameContractClient::new(&env, &contract_id);
+
+        client.initialize_token(&admin, &token_address);
+        client.initialize_puzzle_rewards(&admin, &Bytes::from_slice(&env, &[0u8; 32]), &0i128, &0u32, &treasury_addr);
+        client.configure_refund_system(&admin, &1000u64);
+        client.set_max_stake(&1_000i128);
+
+        let wager: i128 = 100;
+        let game_id = client.create_game(&player1, &wager);
+
+        // Try to refund before deadline
+        let result = client.try_emergency_refund(&game_id, &player1);
+        assert_eq!(result, Err(Ok(ContractError::RefundDeadlineNotReached)));
+    }
+
+    #[test]
+    fn test_emergency_refund_with_two_players() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let issuer = Address::generate(&env);
+        let stellar_token = env.register_stellar_asset_contract_v2(issuer.clone());
+        let token_address = stellar_token.address();
+        let token_client = TokenClient::new(&env, &token_address);
+        let stellar_asset_client = StellarAssetClient::new(&env, &token_address);
+
+        let admin = Address::generate(&env);
+        let player1 = Address::generate(&env);
+        let player2 = Address::generate(&env);
+        let treasury_addr = Address::generate(&env);
+
+        stellar_asset_client.mint(&player1, &1_000i128);
+        stellar_asset_client.mint(&player2, &1_000i128);
+
+        let contract_id = env.register_contract(None, GameContract);
+        let client = GameContractClient::new(&env, &contract_id);
+
+        client.initialize_token(&admin, &token_address);
+        client.initialize_puzzle_rewards(&admin, &Bytes::from_slice(&env, &[0u8; 32]), &0i128, &0u32, &treasury_addr);
+        client.configure_refund_system(&admin, &100u64);
+        client.set_max_stake(&1_000i128);
+
+        let wager: i128 = 100;
+        let game_id = client.create_game(&player1, &wager);
+        client.join_game(&game_id, &player2);
+
+        // Advance ledger past refund deadline
+        env.ledger().set_sequence_number(101);
+
+        // Player1 requests refund
+        client.emergency_refund(&game_id, &player1);
+
+        // Both players should get refunds
+        assert_eq!(token_client.balance(&player1), 1_000);
+        assert_eq!(token_client.balance(&player2), 1_000);
+    }
+
+    #[test]
+    fn test_cannot_refund_after_moves() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let issuer = Address::generate(&env);
+        let stellar_token = env.register_stellar_asset_contract_v2(issuer.clone());
+        let token_address = stellar_token.address();
+        let stellar_asset_client = StellarAssetClient::new(&env, &token_address);
+
+        let admin = Address::generate(&env);
+        let player1 = Address::generate(&env);
+        let player2 = Address::generate(&env);
+        let treasury_addr = Address::generate(&env);
+
+        stellar_asset_client.mint(&player1, &1_000i128);
+        stellar_asset_client.mint(&player2, &1_000i128);
+
+        let contract_id = env.register_contract(None, GameContract);
+        let client = GameContractClient::new(&env, &contract_id);
+
+        client.initialize_token(&admin, &token_address);
+        client.initialize_puzzle_rewards(&admin, &Bytes::from_slice(&env, &[0u8; 32]), &0i128, &0u32, &treasury_addr);
+        client.configure_refund_system(&admin, &100u64);
+        client.set_max_stake(&1_000i128);
+
+        let wager: i128 = 100;
+        let game_id = client.create_game(&player1, &wager);
+        client.join_game(&game_id, &player2);
+
+        // Submit a move
+        let mut move_data = Vec::new(&env);
+        move_data.push_back(1);
+        client.submit_move(&game_id, &player1, &move_data);
+
+        // Advance ledger past refund deadline
+        env.ledger().set_sequence_number(101);
+
+        // Should not be able to refund after moves
+        let result = client.try_emergency_refund(&game_id, &player1);
+        assert_eq!(result, Err(Ok(ContractError::RefundNotAllowed)));
     }
 }
